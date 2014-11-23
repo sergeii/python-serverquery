@@ -1,13 +1,13 @@
-# -*- coding: utf-8 -*-
+# coding: utf-8
 from __future__ import unicode_literals
-
-from functools import reduce
+import re
 from collections import OrderedDict
 
-from serverquery import base
+from .. import Server as BaseServer
+from ..exceptions import ResponseIncomplete, ResponseMalformed
 
 
-class Server(base.Server):
+class Server(BaseServer):
     packets = {
         'status': b'\\status\\',
     }
@@ -20,62 +20,118 @@ class Server(base.Server):
     )
 
     def parse_packets(self, packets):
-        ordered, count = self._order_packets(packets)
+        """
+        Parse and sort packets received in a response.
+
+        :param packets: List of received packets
+        :type packets: list
+        :return: List of packets sorted in the original order
+        :type return: list
+
+        :raises ResponseIncomplete: if not enough packets
+        """
+        packets, count = self._sort_packets(packets)
         # check the packet length
-        if not count or count > len(ordered):
-            raise base.ResponseIncomplete('%s != %s' % (count, len(ordered)))
-        return ordered
+        if not count or count > len(packets):
+            raise ResponseIncomplete(
+                'expected length of {} does not match the actual length {}'.format(count, len(packets))
+            )
+        return packets
 
     def format_packets(self, packets):
-        parsed = []
-        # sort by packet ids and merge the packets
-        merged = []
-        for key, value in sorted(packets.items()):
-            merged.append(value)
-        # split params and construct name => value pairs
-        for name, value in self._parse_params(b''.join(merged)):
-            parsed.append((name.decode('utf-8', errors='ignore'), value.decode('utf-8', errors='ignore')))
-        return parsed
+        """
+        Attempt to sort packets in the original order and parse their contents.
+
+        :param packets: List of packets' contents
+        :type packets: list
+        :return: List of params
+        :type return: list
+        """
+        return self._parse_params(u''.join(packets))
 
     def format_response(self, response):
+        """
+        Turn a formatted response data into an ordered dict.
+
+        :param response: Formatted response
+        :type response: tuple
+        :return: Response dict
+        :type return: collections.OrderedDict
+        """
         return OrderedDict(response)
 
-    def _order_packets(self, packets):
+    def _sort_packets(self, packets):
         count = None
-        ordered = {}
-        for packet in packets:
-            packet_id = None
-            for name, value in self._parse_params(packet):
-                if not packet_id and name in (b'statusresponse', b'queryid'):
+        numbered = {}
+        for data in packets:
+            data = self._decode(data)
+            id = None
+            for param, value in self._parse_params(data):
+                if id is None and param in ('statusresponse', 'queryid'):
                     # \statusresponse\1 or \queryid\1
                     try:
-                        packet_id = int(value)
+                        # attempt to read the next piece of data
+                        id = int(value)
+                    except IndexError:
+                        raise ResponseMalformed('invalid queryid')
                     # \queryid\gs1
-                    except:
-                        packet_id = 1
-                elif name == b'final':
-                    # packet_id should have already been picked up with the previous iteration
-                    try:
-                        assert packet_id is not None, 'packet_id is None'
-                    except AssertionError as e:
-                        raise base.ResponseMalformed(e)
+                    except ValueError:
+                        id = 1
                     else:
-                        count = packet_id
-            if packet_id is None:
-                raise base.ResponseMalformed('failed to read packet id')
-            ordered[packet_id] = packet
-        return ordered, count
+                        # statusresponse is zero based
+                        id += (param == 'statusresponse')
+                # this is the final packet
+                elif param == 'final':
+                    count = id
+            if id is None:
+                raise ResponseMalformed('failed to read packet id')
+            numbered[id] = self._fix_packet_contents(data)
+        # sort packets by their ids
+        return [value for key, value in sorted(numbered.items())], count
 
     def _parse_params(self, data):
+        """
+        Split a response into a list of params.
+
+        :param data: Response contents
+        :type data: unicode
+        :return: List of (key, value) param tuples
+        :type return: list
+        """
         params = []
-        split = data.split(b'\\')
-        for i, name in enumerate(split):
+        split = data.split('\\')
+        for i, key in enumerate(split):
             # skip values
             if not i % 2:
                 continue
+            # fetch the value
             try:
-                # fetch the value
-                params.append((name, split[i + 1]))
+                value = split[i + 1]
             except IndexError:
                 pass
+            else:
+                params.append((key, value))
         return params
+
+    def _fix_packet_contents(self, data):
+        """
+        Remove standard non compliant headers from packet contents.
+
+        :param data: Packet contents
+        :type data: unicode
+        :return: Packet contents
+        :type return: unicode
+        """
+        return re.sub(r'(?:^\\statusresponse\\\d+|\\eof\\$)', '', data)
+
+    def _decode(self, data):
+        """
+        Decode a piece of data into a unicode string.
+
+        :param data: Data
+        :return: Unicode string
+        """
+        try:
+            return data.decode('utf-8', errors='ignore')
+        except (AttributeError, UnicodeDecodeError):
+            return self._decode(str(data))

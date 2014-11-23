@@ -1,1 +1,1 @@
-__all__ = ['gamespy1',]
+__all__ = ['gamespy1']

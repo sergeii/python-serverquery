@@ -62,6 +62,7 @@ class Server(BaseServer):
 
     def _sort_packets(self, packets):
         count = None
+        is_final = False
         numbered = {}
         for data in packets:
             data = self._decode(data)
@@ -82,7 +83,9 @@ class Server(BaseServer):
                         id += (param == 'statusresponse')
                 # this is the final packet
                 elif param == 'final':
-                    count = id
+                    is_final = True
+            if is_final:
+                count = id
             if id is None:
                 raise ResponseMalformed('failed to read packet id')
             numbered[id] = self._fix_packet_contents(data)
